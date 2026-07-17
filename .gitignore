@@ -8,5 +8,15 @@ Cargo.lock
 .soroban
 .stellar
 
+# macOS
+.DS_Store
+.DS_Store?
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+*.DS_Store
+
 # IDE settings
 .vscode/
