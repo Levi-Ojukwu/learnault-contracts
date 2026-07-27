@@ -283,10 +283,7 @@ impl CourseRegistry {
             "Unauthorized: Caller is not the protocol admin"
         );
 
-        assert!(
-            new_reward_amount >= 0,
-            "reward_amount must be non-negative"
-        );
+        assert!(new_reward_amount >= 0, "reward_amount must be non-negative");
 
         let mut course: Course = env
             .storage()
