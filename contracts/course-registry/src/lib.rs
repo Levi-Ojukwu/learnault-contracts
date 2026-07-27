@@ -4,6 +4,9 @@ use soroban_sdk::{contract, contractevent, contractimpl, Address, BytesN, Env};
 pub mod types;
 use types::{Course, DataKey};
 
+use badge_nft::BadgeNFTClient;
+use reward_pool::RewardPoolClient;
+
 #[contract]
 pub struct CourseRegistry;
 
@@ -33,12 +36,37 @@ pub struct CourseStatusChanged {
 }
 
 #[contractevent]
+pub struct OwnershipTransferred {
+    #[topic]
+    pub course_id: u32,
+    #[topic]
+    pub previous_instructor: Address,
+    pub new_instructor: Address,
+}
+
+#[contractevent]
 pub struct ModuleCompleted {
     #[topic]
     pub learner: Address,
     #[topic]
     pub course_id: u32,
     pub new_progress: u32,
+}
+
+#[contractevent]
+pub struct CourseCompleted {
+    #[topic]
+    pub learner: Address,
+    #[topic]
+    pub course_id: u32,
+    pub reward_amount: i128,
+}
+
+#[contractevent]
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
 }
 
 #[contractimpl]
@@ -49,6 +77,46 @@ impl CourseRegistry {
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    /// Registers the RewardPool contract address so the registry can trigger payouts on completion.
+    /// Only callable by the Protocol Admin.
+    pub fn set_reward_pool_address(env: Env, admin: Address, reward_pool_address: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        assert!(
+            admin == stored_admin,
+            "Unauthorized: Caller is not the protocol admin"
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RewardPoolAddress, &reward_pool_address);
+    }
+
+    /// Registers the BadgeNFT contract address so the registry can mint badges on completion.
+    /// Only callable by the Protocol Admin.
+    pub fn set_badge_nft_address(env: Env, admin: Address, badge_nft_address: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        assert!(
+            admin == stored_admin,
+            "Unauthorized: Caller is not the protocol admin"
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BadgeNftAddress, &badge_nft_address);
     }
 
     /// Registers a new course on-chain.
@@ -234,6 +302,40 @@ impl CourseRegistry {
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Transfers ownership of a course to a new instructor address.
+    /// Only callable by the current instructor of the course.
+    pub fn transfer_ownership(
+        env: Env,
+        current_instructor: Address,
+        new_instructor: Address,
+        course_id: u32,
+    ) {
+        let mut course: Course = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Course(course_id))
+            .expect("Course not found");
+
+        assert!(
+            course.instructor == current_instructor,
+            "Unauthorized: Caller is not the course instructor"
+        );
+
+        current_instructor.require_auth();
+
+        course.instructor = new_instructor.clone();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Course(course_id), &course);
+
+        OwnershipTransferred {
+            course_id,
+            previous_instructor: current_instructor,
+            new_instructor,
+        }
+        .publish(&env);
+    }
+
     /// Records a learner's completion of a module after off-chain quiz validation.
     /// Only callable by the authorized verifier (protocol admin).
     pub fn complete_module(env: Env, verifier: Address, learner: Address, id: u32) {
@@ -281,9 +383,64 @@ impl CourseRegistry {
 
         // 8. Emit ModuleCompleted event
         ModuleCompleted {
-            learner,
+            learner: learner.clone(),
             course_id: id,
             new_progress,
+        }
+        .publish(&env);
+
+        // 9. If the learner just finished the final module, mint their soulbound badge
+        if new_progress == course.total_modules {
+            if let Some(badge_nft_address) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::BadgeNftAddress)
+            {
+                let badge_nft = BadgeNFTClient::new(&env, &badge_nft_address);
+                badge_nft.mint_badge(&env.current_contract_address(), &learner, &id);
+            }
+
+            // 10. Trigger reward distribution if RewardPool address is configured
+            if let Some(reward_pool_address) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::RewardPoolAddress)
+            {
+                let reward_pool = RewardPoolClient::new(&env, &reward_pool_address);
+                let base_reward: i128 = 10_0000000; // 10 USDC (7 decimal places)
+                reward_pool.distribute_reward(
+                    &env.current_contract_address(),
+                    &learner,
+                    &base_reward,
+                );
+
+                CourseCompleted {
+                    learner: learner.clone(),
+                    course_id: id,
+                    reward_amount: base_reward,
+                }
+                .publish(&env);
+            }
+        }
+    }
+
+    /// Upgrades the contract WASM. Only callable by the Protocol Admin.
+    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        assert!(admin == stored_admin, "Unauthorized");
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        ContractUpgraded {
+            admin,
+            new_wasm_hash,
         }
         .publish(&env);
     }

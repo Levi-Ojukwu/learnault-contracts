@@ -35,8 +35,12 @@ pub struct Submission {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
+    Admin,
     Quest(u32),
     Submission(Address, u32), // (Submitter Address, Quest ID)
     Token,
     QuestCounter,
+    RewardPool,
+    IsPaused,
+    StakeVault,
 }
